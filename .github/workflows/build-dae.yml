@@ -46,12 +46,16 @@ on:
         default: "1024"
       bundle_geodata:
         description: "独立二进制包内附带 geoip.dat / geosite.dat（apk 不含，由 dae-geoip/dae-geosite 包提供）"
-        type: boolean
-        default: true
+        type: choice
+        options: ['true', 'false']
+        default: 'true'
+
       build_apk:
         description: "使用 ImmortalWrt SDK 打包 .apk 安装包"
-        type: boolean
-        default: true
+        type: choice
+        options: ['true', 'false']
+        default: 'true'
+
       immortalwrt_version:
         description: "ImmortalWrt 版本目录（如 25.12.0；填 snapshots 使用快照 SDK）"
         required: true
@@ -62,8 +66,10 @@ on:
         default: "mediatek/filogic"
       create_release:
         description: "创建 / 更新 GitHub Release"
-        type: boolean
-        default: true
+        type: choice
+        options: ['true', 'false']
+        default: 'true'
+
       release_tag:
         description: "Release tag（留空自动生成为 dae-<版本>-arm64）"
         required: false
@@ -102,9 +108,9 @@ jobs:
       GO_VERSION: ${{ inputs.go_version || '1.26.x' }}
       IN_IW_VERSION: ${{ inputs.immortalwrt_version || '25.12.0' }}
       IN_IW_TARGET: ${{ inputs.immortalwrt_target || 'mediatek/filogic' }}
-      IN_BUNDLE_GEODATA: ${{ inputs.bundle_geodata == false && 'false' || 'true' }}
-      IN_BUILD_APK: ${{ inputs.build_apk == false && 'false' || 'true' }}
-      IN_CREATE_RELEASE: ${{ inputs.create_release == false && 'false' || 'true' }}
+      IN_BUNDLE_GEODATA: ${{ inputs.bundle_geodata || 'true' }}
+      IN_BUILD_APK: ${{ inputs.build_apk || 'true' }}
+      IN_CREATE_RELEASE: ${{ inputs.create_release || 'true' }}
       # 与上游 release.yml 保持一致：clang-15 / llvm-15 是 dae 官方验证过的工具链
       CLANG: clang-15
       STRIP: llvm-strip-15
