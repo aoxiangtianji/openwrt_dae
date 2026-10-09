@@ -1,0 +1,116 @@
+# =============================================================================
+# dae 配置模板（ImmortalWrt / MediaTek Filogic 路由器适配版）
+#
+# 完整配置项与说明见上游 example.dae：
+#   https://github.com/daeuniverse/dae/blob/main/example.dae
+# 本文件含订阅链接等敏感信息，权限必须为 0600（安装脚本会自动设置）。
+#
+# 修改后先校验再热重载（不会断开已有连接）：
+#   dae validate -c /etc/dae/config.dae && /etc/init.d/dae reload
+# =============================================================================
+
+global {
+    # eBPF 流量劫持端口（本地端口，无需对外开放）
+    tproxy_port: 12345
+    tproxy_port_protect: true
+
+    log_level: info
+
+    # 路由器内存有限：限制 eBPF 连接跟踪表规模，降低内核内存占用
+    bpf_conn_state_map_size: 65536
+
+    # 关闭透明大页，避免路由器上 RSS 抖动
+    disable_thp: true
+
+    # 出口接口：auto 会自动探测；也可写死（如 'eth1' 或 'wan'）
+    wan_interface: auto
+
+    # 入口（LAN）接口：作为网关代理局域网流量时必填，家宽通常为 br-lan
+    lan_interface: br-lan
+
+    # 自动配置内核参数（ip_forward 等）
+    auto_config_kernel_parameter: true
+
+    # 节点连通性检测目标
+    tcp_check_url: 'http://cp.cloudflare.com,1.1.1.1'
+    tcp_check_http_method: HEAD
+    udp_check_dns: 'dns.google:53,8.8.8.8'
+    check_interval: 30s
+    check_tolerance: 50ms
+
+    # 连接方式：domain 依据嗅探到的域名拨号，抗 DNS 污染且响应更快
+    dial_mode: domain
+    allow_insecure: false
+
+    # 嗅探首个数据包的等待时间；校园网 / 高延迟网络可增大到 100~300ms
+    sniffing_timeout: 100ms
+
+    tls_implementation: tls
+
+    # 带宽声明：部分协议（如 Hysteria2）据此优化，按实际线路填写
+    bandwidth_max_tx: '100 mbps'
+    bandwidth_max_rx: '300 mbps'
+}
+
+# -----------------------------------------------------------------------------
+# 订阅：把下面这行替换成你自己的订阅链接
+# -----------------------------------------------------------------------------
+subscription {
+    my_sub: 'https://example.com/your-subscription-link'
+}
+
+dns {
+    # RFC 8767 乐观缓存：过期记录在 stale 窗口内仍可直接返回，
+    # 同时后台刷新，显著降低 DNS 等待（v2.0.0 起的特性）。
+    optimistic_cache: true
+    optimistic_cache_ttl: 60
+
+    # 限制 DNS 缓存条目数，避免路由器内存被无限占用
+    max_cache_size: 4096
+
+    upstream {
+        alidns: 'udp://223.5.5.5:53'
+        googledns: 'tcp+udp://dns.google:53'
+    }
+
+    routing {
+        request {
+            # 国内域名走国内 DNS，其余走境外 DNS
+            qname(geosite:cn) -> alidns
+            fallback: googledns
+        }
+        response {
+            upstream(googledns) -> accept
+            # 返回内网 IP 且不属于国内域名：疑似污染，重新用境外 DNS 查询
+            ip(geoip:private) && !qname(geosite:cn) -> googledns
+            fallback: accept
+        }
+    }
+}
+
+group {
+    proxy {
+        # 自动选择延迟最优（移动平均）节点
+        policy: min_moving_avg
+    }
+}
+
+routing {
+    # dae 自身流量直连，避免回环
+    pname(dae) -> must_direct
+
+    # 广播 / 组播不走代理
+    dip(224.0.0.0/3, 'ff00::/8') -> direct
+
+    # 内网地址直连
+    dip(geoip:private) -> direct
+
+    # 关闭 QUIC（UDP/443），避免部分线路下 UDP 转发性能差、占用高
+    l4proto(udp) && dport(443) -> block
+
+    # 国内 IP / 域名直连，其余走代理组
+    dip(geoip:cn) -> direct
+    domain(geosite:cn) -> direct
+
+    fallback: proxy
+}

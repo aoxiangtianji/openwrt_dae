@@ -1,0 +1,16 @@
+# 构建中间产物
+build/
+dist/
+apk/
+sdk/
+*.tmp
+
+# 预编译产物由 CI 在打包前放入，不入库
+openwrt/package/dae/prebuilt/
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+.DS_Store
+orig-backup/

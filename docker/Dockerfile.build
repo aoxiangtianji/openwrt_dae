@@ -1,0 +1,32 @@
+# =============================================================================
+# dae 交叉编译环境（在 x86_64 主机上构建 aarch64 版 dae）
+#
+# 说明：Go 原生支持交叉编译，clang 负责把 eBPF C 代码编译成 bpfel 字节码，
+#       因此不需要 QEMU / 不需要 arm64 基础镜像，构建速度快。
+#
+# 构建镜像：docker build -t dae-builder:1.26 -f docker/Dockerfile.build .
+# 运行构建：docker run --rm -v "$PWD":/work -w /work dae-builder:1.26 bash scripts/build-dae.sh
+# 或直接使用：scripts/build-with-docker.sh
+# =============================================================================
+FROM golang:1.26-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang-15 \
+        llvm-15 \
+        git \
+        make \
+        ca-certificates \
+        curl \
+        xz-utils \
+        zip \
+        zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+# 与 dae 上游 release 构建保持一致的工具链
+ENV CLANG=clang-15 \
+    STRIP=llvm-strip-15 \
+    GOFLAGS=-modcacherw
+
+WORKDIR /work
+
+CMD ["bash", "scripts/build-dae.sh"]

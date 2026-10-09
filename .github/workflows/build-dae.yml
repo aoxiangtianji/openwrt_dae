@@ -1,0 +1,362 @@
+name: Build dae for ImmortalWrt (aarch64_cortex-a53)
+
+# =============================================================================
+# 目标环境
+#   - 硬件：MediaTek Filogic（ARM64 / aarch64_cortex-a53，双核）
+#   - 系统：ImmortalWrt 25.12.x（基于 OpenWrt 25.x 代码树，包管理器为 apk）
+#   - 内核：Linux 6.12.x；ImmortalWrt 官方 filogic 固件已开启
+#           CONFIG_KERNEL_DEBUG_INFO_BTF=y，因此 dae 的 CO-RE eBPF 可正常加载
+#
+# 本 workflow 产出两件套：
+#   1) 独立静态二进制包 dae-<版本>-linux-arm64.tar.gz / .zip
+#      （内含 dae 二进制、procd init 脚本、UCI 模板、config.dae 示例、一键部署脚本）
+#   2) OpenWrt / ImmortalWrt 安装包 dae-<版本>-r1.apk
+#      （使用 ImmortalWrt 官方 SDK 打包，含 /etc/init.d/dae 与 geo 数据）
+#
+# 触发方式：仓库 Actions 页 → 左侧 “Build dae for ImmortalWrt” → Run workflow
+#           保留默认值即可得到 dae v2.1.1 的 aarch64 包。
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      dae_repo:
+        description: "dae 上游仓库地址"
+        required: true
+        default: "https://github.com/daeuniverse/dae"
+      dae_ref:
+        description: "dae 源码 ref（tag / 分支 / commit，默认锁定 v2.1.1（最新版））"
+        required: true
+        default: "v2.1.1"
+      go_version:
+        description: "Go 工具链版本（dae v2.x 要求 Go 1.26+）"
+        required: true
+        default: "1.26.x"
+      goarch:
+        description: "目标 GOARCH"
+        required: true
+        default: "arm64"
+      bpf_target:
+        description: "eBPF 字节码目标：arm64 为小端，只需 bpfel"
+        required: true
+        default: "bpfel"
+      max_match_set_len:
+        description: "eBPF 规则集最大长度（越小越省内存）"
+        required: true
+        default: "1024"
+      bundle_geodata:
+        description: "独立二进制包内附带 geoip.dat / geosite.dat（apk 不含，由 dae-geoip/dae-geosite 包提供）"
+        type: boolean
+        default: true
+      build_apk:
+        description: "使用 ImmortalWrt SDK 打包 .apk 安装包"
+        type: boolean
+        default: true
+      immortalwrt_version:
+        description: "ImmortalWrt 版本目录（如 25.12.0；填 snapshots 使用快照 SDK）"
+        required: true
+        default: "25.12.0"
+      immortalwrt_target:
+        description: "ImmortalWrt target（Filogic 为 mediatek/filogic）"
+        required: true
+        default: "mediatek/filogic"
+      create_release:
+        description: "创建 / 更新 GitHub Release"
+        type: boolean
+        default: true
+      release_tag:
+        description: "Release tag（留空自动生成为 dae-<版本>-arm64）"
+        required: false
+        default: ""
+
+  # 推送到 main 时自动构建（首次初始化本仓库时会立即产出首个安装包）
+  push:
+    branches: [ main ]
+    paths:
+      - 'openwrt/**'
+      - 'scripts/**'
+      - 'docker/**'
+      - '.github/workflows/build-dae.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: 构建 dae (${{ inputs.goarch }}) 并打包
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    env:
+      DAE_REPO: ${{ inputs.dae_repo }}
+      DAE_REF: ${{ inputs.dae_ref }}
+      GOARCH: ${{ inputs.goarch }}
+      BPF_TARGET: ${{ inputs.bpf_target }}
+      MAX_MATCH_SET_LEN: ${{ inputs.max_match_set_len }}
+      # 与上游 release.yml 保持一致：clang-15 / llvm-15 是 dae 官方验证过的工具链
+      CLANG: clang-15
+      STRIP: llvm-strip-15
+
+    steps:
+      - name: 检出本打包工程
+        uses: actions/checkout@v4
+
+      - name: 计算版本号与产物命名
+        id: meta
+        run: |
+          set -euo pipefail
+          VER="${{ inputs.dae_ref }}"
+          VER="${VER#refs/tags/}"
+          ASSET="dae-${VER}-linux-${{ inputs.goarch }}"
+          TAG="${{ inputs.release_tag }}"
+          [ -n "$TAG" ] || TAG="dae-${VER}-${{ inputs.goarch }}"
+          {
+            echo "version=${VER}"
+            echo "asset=${ASSET}"
+            echo "tag=${TAG}"
+            echo "date=$(date -u +%Y%m%d)"
+          } >> "$GITHUB_OUTPUT"
+          echo "dae 版本 : ${VER}"
+          echo "产物名称 : ${ASSET}"
+          echo "Release  : ${TAG}"
+
+      - name: 安装 clang / llvm（编译 eBPF 字节码必需）
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            clang-15 llvm-15 zstd xz-utils zip ca-certificates
+          clang-15 --version | head -n 1
+          llvm-strip-15 --version | head -n 1
+
+      - name: 安装 Go ${{ inputs.go_version }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go_version }}
+
+      - name: 检出 dae 源码（含 eBPF headers 子模块）
+        run: |
+          set -euo pipefail
+          SRC="${GITHUB_WORKSPACE}/build/src/dae"
+          mkdir -p "$(dirname "$SRC")"
+          # tag / 分支可用 --branch 浅克隆；裸 commit 走完整克隆兜底
+          if ! git clone --depth 1 --branch "${DAE_REF}" "${DAE_REPO}" "$SRC" 2>/dev/null; then
+            rm -rf "$SRC"
+            git clone "${DAE_REPO}" "$SRC"
+            git -C "$SRC" checkout "${DAE_REF}"
+          fi
+          # 两个 eBPF 子模块（daeuniverse/dae_bpf_headers），缺失会导致 bpf2go 失败
+          git -C "$SRC" submodule update --init --recursive
+          git -C "$SRC" log -1 --format='源码 commit: %H (%cd)' --date=iso
+          test -f "$SRC/control/kern/headers/bpf_helpers.h" \
+            || test -d "$SRC/control/kern/headers" \
+            && echo "eBPF headers 子模块: OK"
+
+      - name: 缓存 Go 模块与编译缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ inputs.go_version }}-${{ inputs.dae_ref }}-${{ hashFiles('build/src/dae/go.sum') }}
+          restore-keys: |
+            go-${{ inputs.go_version }}-${{ inputs.dae_ref }}-
+            go-${{ inputs.go_version }}-
+
+      - name: 下载 Go 依赖
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build/src/dae"
+          go mod download -modcacherw
+          go version
+
+      - name: 构建 dae（编译 eBPF 字节码 + 注入版本信息）
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          SRC_DIR: ${{ github.workspace }}/build/src/dae
+          OUTPUT: ${{ github.workspace }}/pkgdir/usr/bin/dae
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "${OUTPUT}")"
+          bash scripts/build-dae.sh
+
+      - name: 校验二进制（架构 / 静态链接 / eBPF 内嵌 / 版本）
+        run: |
+          set -euo pipefail
+          BIN="${GITHUB_WORKSPACE}/pkgdir/usr/bin/dae"
+          ls -lh "$BIN"
+          file "$BIN"
+
+          echo "::group::架构校验"
+          if file "$BIN" | grep -Eq 'ARM aarch64|AArch64'; then
+            echo "架构校验通过：aarch64"
+          else
+            echo "::error::产物架构不是 aarch64"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+          echo "::group::静态链接校验"
+          if readelf -d "$BIN" 2>/dev/null | grep -q 'NEEDED'; then
+            echo "::warning::检测到动态依赖（CGO_ENABLED 可能未置 0）"
+            readelf -d "$BIN" | grep 'NEEDED' || true
+          else
+            echo "无动态依赖：纯静态二进制，可在 musl 环境直接运行"
+          fi
+          echo "::endgroup::"
+
+          echo "::group::eBPF 字节码内嵌校验"
+          if strings -a "$BIN" | grep -qm1 'bpfel'; then
+            echo "已内嵌 bpfel eBPF 字节码"
+          else
+            echo "::warning::未在二进制中找到 bpfel 标记，请留意"
+          fi
+          echo "::endgroup::"
+
+          echo "::group::QEMU 冒烟测试"
+          sudo apt-get install -y --no-install-recommends qemu-user-static >/dev/null 2>&1 || true
+          if command -v qemu-aarch64-static >/dev/null 2>&1; then
+            qemu-aarch64-static "$BIN" --version || echo "::warning::QEMU 冒烟测试未通过（不阻塞构建）"
+          else
+            echo "qemu-aarch64-static 不可用，跳过冒烟测试"
+          fi
+          echo "::endgroup::"
+
+          mkdir -p "${GITHUB_WORKSPACE}/dist"
+          sha256sum "$BIN" | sed 's#.*/pkgdir/##' > "${GITHUB_WORKSPACE}/dist/dae-binary.sha256"
+          cat "${GITHUB_WORKSPACE}/dist/dae-binary.sha256"
+
+      - name: 组装独立二进制包（二进制 + init 脚本 + 配置模板 + 部署脚本）
+        run: |
+          set -euo pipefail
+          ASSET="${{ steps.meta.outputs.asset }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+          DIST="${GITHUB_WORKSPACE}/dist"
+          OUT="${DIST}/${ASSET}"
+          mkdir -p "$OUT"
+
+          install -m0755 "${GITHUB_WORKSPACE}/pkgdir/usr/bin/dae"      "$OUT/dae"
+          install -m0755 openwrt/package/dae/files/etc/init.d/dae     "$OUT/dae.init"
+          install -m0644 openwrt/package/dae/files/etc/config/dae     "$OUT/dae.uci"
+          install -m0600 openwrt/optional/config.dae.example                 "$OUT/config.dae.example"
+          install -m0755 scripts/install-on-router.sh                 "$OUT/install.sh"
+
+          if [ "${{ inputs.bundle_geodata }}" = "true" ]; then
+            echo "下载 geoip.dat / geosite.dat ..."
+            curl -fsSL --retry 3 -o "$OUT/geoip.dat" \
+              https://github.com/v2fly/geoip/releases/latest/download/geoip.dat \
+              || echo "::warning::geoip.dat 下载失败，可稍后在路由器上自行放置"
+            curl -fsSL --retry 3 -o "$OUT/geosite.dat" \
+              https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat \
+              || echo "::warning::geosite.dat 下载失败，可稍后在路由器上自行放置"
+          fi
+
+          cat > "$OUT/README.txt" <<EOF
+          dae ${VERSION} for ImmortalWrt / OpenWrt (aarch64_cortex-a53)
+          构建时间(UTC): $(date -u '+%Y-%m-%d %H:%M:%S')
+
+          文件说明
+            dae                     - 静态编译的 aarch64 二进制（eBPF 字节码已内嵌）
+            dae.init                - procd 启动脚本（安装到 /etc/init.d/dae）
+            dae.uci                 - UCI 配置模板（安装到 /etc/config/dae）
+            config.dae.example      - dae 配置示例（安装到 /etc/dae/config.dae，权限 0600）
+            geoip.dat / geosite.dat - 分流规则数据（安装到 /usr/share/dae/）
+            install.sh              - 在路由器上执行的一键安装 / 升级脚本
+
+          在路由器上安装（以 root 执行）
+            sh install.sh
+
+          手动安装
+            /etc/init.d/dae stop
+            cp dae /usr/bin/dae && chmod 0755 /usr/bin/dae
+            cp config.dae.example /etc/dae/config.dae && chmod 0600 /etc/dae/config.dae
+            /etc/init.d/dae start
+
+          详细说明见工程 README.md 与 docs/DEPLOY.md
+          EOF
+
+          tar -C "$DIST" -czf "${DIST}/${ASSET}.tar.gz" "${ASSET}"
+          ( cd "$DIST" && zip -9rq "${ASSET}.zip" "${ASSET}" )
+          ( cd "$DIST" && sha256sum "${ASSET}.tar.gz" "${ASSET}.zip" > SHA256SUMS )
+          ls -lh "$DIST"
+
+      - name: 使用 ImmortalWrt SDK 打包 .apk
+        if: ${{ inputs.build_apk }}
+        env:
+          DAE_VERSION: ${{ steps.meta.outputs.version }}
+          IW_VERSION: ${{ inputs.immortalwrt_version }}
+          IW_TARGET: ${{ inputs.immortalwrt_target }}
+          DAE_BINARY: ${{ github.workspace }}/pkgdir/usr/bin/dae
+        run: |
+          set -euo pipefail
+          bash scripts/build-apk.sh
+
+      - name: 上传 Artifact（可直接下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: dae-${{ steps.meta.outputs.version }}-aarch64
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+            apk/*.apk
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: 创建 / 更新 GitHub Release
+        if: ${{ inputs.create_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: dae ${{ steps.meta.outputs.version }} · ImmortalWrt aarch64_cortex-a53
+          make_latest: true
+          fail_on_unmatched_files: false
+          body: |
+            ## dae ${{ steps.meta.outputs.version }} for ImmortalWrt / OpenWrt (aarch64_cortex-a53)
+
+            面向 MediaTek Filogic（ARM64 双核）的 ImmortalWrt 25.12.x 构建。
+
+            | 项目 | 值 |
+            | --- | --- |
+            | 上游仓库 | `${{ inputs.dae_repo }}` |
+            | 源码 ref | `${{ inputs.dae_ref }}` |
+            | GOOS / GOARCH | `linux` / `${{ inputs.goarch }}` |
+            | eBPF target | `${{ inputs.bpf_target }}` |
+            | Go | `${{ inputs.go_version }}` |
+            | 工具链 | clang-15 / llvm-15，CGO_ENABLED=0（纯静态） |
+            | 构建日期 | ${{ steps.meta.outputs.date }} (UTC) |
+
+            ### 产物
+
+            - `${{ steps.meta.outputs.asset }}.tar.gz` / `.zip`：独立二进制包，内含 `dae`、
+              procd 启动脚本、UCI 模板、`config.dae` 示例与一键部署脚本 `install.sh`
+            - `dae-*.apk`：ImmortalWrt 安装包
+            - `SHA256SUMS`：校验值
+
+            ### 路由器上快速部署
+
+            ```sh
+            # 1) 上传（在电脑上执行，10.10.10.1 换成路由器地址）
+            scp dae-*-linux-arm64.tar.gz root@10.10.10.1:/tmp/
+
+            # 2) 在路由器上安装 / 升级
+            ssh root@10.10.10.1
+            cd /tmp && tar xzf dae-*-linux-arm64.tar.gz && cd dae-*-linux-arm64
+            sh install.sh
+
+            # 3) 验证
+            dae --version
+            /etc/init.d/dae status
+            ```
+
+            升级后如需让新版二进制生效，需重启服务（`/etc/init.d/dae restart`）；
+            仅修改 `config.dae` 时可用 `/etc/init.d/dae reload` 零中断热重载。
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+            apk/*.apk
