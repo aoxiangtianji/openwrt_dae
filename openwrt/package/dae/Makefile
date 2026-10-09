@@ -76,16 +76,16 @@ define Package/dae/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/dae $(1)/usr/bin/dae
 
 	$(INSTALL_DIR) $(1)/etc/init.d
-	$(INSTALL_BIN) ./files/etc/init.d/dae $(1)/etc/init.d/dae
+	$(INSTALL_BIN) ./rootfs/etc/init.d/dae $(1)/etc/init.d/dae
 
 	$(INSTALL_DIR) $(1)/etc/config
-	$(INSTALL_CONF) ./files/etc/config/dae $(1)/etc/config/dae
+	$(INSTALL_CONF) ./rootfs/etc/config/dae $(1)/etc/config/dae
 
 	$(INSTALL_DIR) $(1)/etc/dae
-	$(INSTALL_DATA) ./files/etc/dae/example.dae $(1)/etc/dae/example.dae
+	$(INSTALL_CONF) ./rootfs/etc/dae/example.dae $(1)/etc/dae/example.dae
 
 	$(INSTALL_DIR) $(1)/lib/upgrade/keep.d
-	$(INSTALL_DATA) ./files/lib/upgrade/keep.d/dae $(1)/lib/upgrade/keep.d/dae
+	$(INSTALL_DATA) ./rootfs/lib/upgrade/keep.d/dae $(1)/lib/upgrade/keep.d/dae
 endef
 
 # 安装后仅注册开机自启（幂等），不启动、不重启服务：

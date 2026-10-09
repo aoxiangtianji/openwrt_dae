@@ -254,8 +254,8 @@ jobs:
           mkdir -p "$OUT"
 
           install -m0755 "${GITHUB_WORKSPACE}/pkgdir/usr/bin/dae"      "$OUT/dae"
-          install -m0755 openwrt/package/dae/files/etc/init.d/dae     "$OUT/dae.init"
-          install -m0644 openwrt/package/dae/files/etc/config/dae     "$OUT/dae.uci"
+          install -m0755 openwrt/package/dae/rootfs/etc/init.d/dae     "$OUT/dae.init"
+          install -m0644 openwrt/package/dae/rootfs/etc/config/dae     "$OUT/dae.uci"
           install -m0600 openwrt/optional/config.dae.example                 "$OUT/config.dae.example"
           install -m0755 scripts/install-on-router.sh                 "$OUT/install.sh"
 
