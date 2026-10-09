@@ -40,6 +40,25 @@
 
 ---
 
+## 部署状态（真机已验证 ✅）
+
+本工程已在真实设备上完成一轮完整交付（2026-10-10）：
+
+| 项目 | 结果 |
+| --- | --- |
+| 目标设备 | ImmortalWrt 25.12-SNAPSHOT `r37876` / `mediatek/filogic` / `aarch64_cortex-a53` / 内核 `6.12.91` |
+| 升级 | dae **1.1.0-r1 → 2.1.1-r1**（全程 `apk` 包管理方式） |
+| 安装包 | `dae-2.1.1-r1.apk`（11,793,147 B，sha256 `36405861bb3cf5188cd1411c9b5fc5ec73787beb4b13ed3663e034af98b357dc`） |
+| 文件变化 | **仅 `/usr/bin/dae` 一个文件**；配置、init 脚本、geo 包、权限全部逐字节未变 |
+| 服务中断 | 约 1~3 秒（eBPF 重新加载），运维通道未受影响 |
+| 验证结果 | 服务 running；日志 0 ERROR / 0 WARN；`www.google.com` 返回 204、`api.github.com` 返回 200 |
+| 回滚保障 | 三层（脚本自动回滚 + 300s 看门狗 + 人工恢复），本次均未触发 |
+
+- 逐条修改记录：[`docs/CHANGES.md`](docs/CHANGES.md)
+- 风险评估与回滚方案：[`docs/DEPLOY-RUNBOOK.md`](docs/DEPLOY-RUNBOOK.md)
+
+---
+
 ## 一、一键构建（GitHub Actions）
 
 1. 把本工程推到 GitHub 仓库（默认分支 `main`）。
