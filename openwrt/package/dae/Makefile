@@ -84,8 +84,10 @@ define Package/dae/install
 	$(INSTALL_DIR) $(1)/etc/dae
 	$(INSTALL_CONF) ./rootfs/etc/dae/example.dae $(1)/etc/dae/example.dae
 
-	$(INSTALL_DIR) $(1)/lib/upgrade/keep.d
-	$(INSTALL_DATA) ./rootfs/lib/upgrade/keep.d/dae $(1)/lib/upgrade/keep.d/dae
+	# 注意：不手工安装 /lib/upgrade/keep.d/dae。
+	# OpenWrt 构建系统会自动把“不在默认保留路径下的 conffile”
+	# （这里是 /etc/dae/config.dae）写入 keep.d；
+	# 若此处再手工提供一份，会导致该文件内容重复两行。
 endef
 
 # 安装后仅注册开机自启（幂等），不启动、不重启服务：
