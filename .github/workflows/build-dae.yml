@@ -87,16 +87,24 @@ concurrency:
 
 jobs:
   build:
-    name: 构建 dae (${{ inputs.goarch }}) 并打包
+    name: 构建 dae (${{ inputs.goarch || 'arm64' }}) 并打包
     runs-on: ubuntu-22.04
     timeout-minutes: 90
 
     env:
-      DAE_REPO: ${{ inputs.dae_repo }}
-      DAE_REF: ${{ inputs.dae_ref }}
-      GOARCH: ${{ inputs.goarch }}
-      BPF_TARGET: ${{ inputs.bpf_target }}
-      MAX_MATCH_SET_LEN: ${{ inputs.max_match_set_len }}
+      # 【重要】push 触发时 inputs.* 全部为空，因此这里统一用 `<expr> || 默认值` 兜底，
+      # 让“手动触发”和“推送自动触发”两个入口的行为完全一致。
+      DAE_REPO: ${{ inputs.dae_repo || 'https://github.com/daeuniverse/dae' }}
+      DAE_REF: ${{ inputs.dae_ref || 'v2.1.1' }}
+      GOARCH: ${{ inputs.goarch || 'arm64' }}
+      BPF_TARGET: ${{ inputs.bpf_target || 'bpfel' }}
+      MAX_MATCH_SET_LEN: ${{ inputs.max_match_set_len || '1024' }}
+      GO_VERSION: ${{ inputs.go_version || '1.26.x' }}
+      IN_IW_VERSION: ${{ inputs.immortalwrt_version || '25.12.0' }}
+      IN_IW_TARGET: ${{ inputs.immortalwrt_target || 'mediatek/filogic' }}
+      IN_BUNDLE_GEODATA: ${{ inputs.bundle_geodata == false && 'false' || 'true' }}
+      IN_BUILD_APK: ${{ inputs.build_apk == false && 'false' || 'true' }}
+      IN_CREATE_RELEASE: ${{ inputs.create_release == false && 'false' || 'true' }}
       # 与上游 release.yml 保持一致：clang-15 / llvm-15 是 dae 官方验证过的工具链
       CLANG: clang-15
       STRIP: llvm-strip-15
@@ -109,11 +117,11 @@ jobs:
         id: meta
         run: |
           set -euo pipefail
-          VER="${{ inputs.dae_ref }}"
+          VER="${{ env.DAE_REF }}"
           VER="${VER#refs/tags/}"
-          ASSET="dae-${VER}-linux-${{ inputs.goarch }}"
+          ASSET="dae-${VER}-linux-${{ env.GOARCH }}"
           TAG="${{ inputs.release_tag }}"
-          [ -n "$TAG" ] || TAG="dae-${VER}-${{ inputs.goarch }}"
+          [ -n "$TAG" ] || TAG="dae-${VER}-${{ env.GOARCH }}"
           {
             echo "version=${VER}"
             echo "asset=${ASSET}"
@@ -133,10 +141,10 @@ jobs:
           clang-15 --version | head -n 1
           llvm-strip-15 --version | head -n 1
 
-      - name: 安装 Go ${{ inputs.go_version }}
+      - name: 安装 Go ${{ env.GO_VERSION }}
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ inputs.go_version }}
+          go-version: ${{ env.GO_VERSION }}
 
       - name: 检出 dae 源码（含 eBPF headers 子模块）
         run: |
@@ -162,10 +170,10 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: go-${{ inputs.go_version }}-${{ inputs.dae_ref }}-${{ hashFiles('build/src/dae/go.sum') }}
+          key: go-${{ env.GO_VERSION }}-${{ env.DAE_REF }}-${{ hashFiles('build/src/dae/go.sum') }}
           restore-keys: |
-            go-${{ inputs.go_version }}-${{ inputs.dae_ref }}-
-            go-${{ inputs.go_version }}-
+            go-${{ env.GO_VERSION }}-${{ env.DAE_REF }}-
+            go-${{ env.GO_VERSION }}-
 
       - name: 下载 Go 依赖
         run: |
@@ -245,7 +253,7 @@ jobs:
           install -m0600 openwrt/optional/config.dae.example                 "$OUT/config.dae.example"
           install -m0755 scripts/install-on-router.sh                 "$OUT/install.sh"
 
-          if [ "${{ inputs.bundle_geodata }}" = "true" ]; then
+          if [ "${{ env.IN_BUNDLE_GEODATA }}" = "true" ]; then
             echo "下载 geoip.dat / geosite.dat ..."
             curl -fsSL --retry 3 -o "$OUT/geoip.dat" \
               https://github.com/v2fly/geoip/releases/latest/download/geoip.dat \
@@ -285,11 +293,11 @@ jobs:
           ls -lh "$DIST"
 
       - name: 使用 ImmortalWrt SDK 打包 .apk
-        if: ${{ inputs.build_apk }}
+        if: env.IN_BUILD_APK == 'true'
         env:
           DAE_VERSION: ${{ steps.meta.outputs.version }}
-          IW_VERSION: ${{ inputs.immortalwrt_version }}
-          IW_TARGET: ${{ inputs.immortalwrt_target }}
+          IW_VERSION: ${{ env.IN_IW_VERSION }}
+          IW_TARGET: ${{ env.IN_IW_TARGET }}
           DAE_BINARY: ${{ github.workspace }}/pkgdir/usr/bin/dae
         run: |
           set -euo pipefail
@@ -308,7 +316,7 @@ jobs:
           retention-days: 30
 
       - name: 创建 / 更新 GitHub Release
-        if: ${{ inputs.create_release }}
+        if: env.IN_CREATE_RELEASE == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
@@ -322,11 +330,11 @@ jobs:
 
             | 项目 | 值 |
             | --- | --- |
-            | 上游仓库 | `${{ inputs.dae_repo }}` |
-            | 源码 ref | `${{ inputs.dae_ref }}` |
-            | GOOS / GOARCH | `linux` / `${{ inputs.goarch }}` |
-            | eBPF target | `${{ inputs.bpf_target }}` |
-            | Go | `${{ inputs.go_version }}` |
+            | 上游仓库 | `${{ env.DAE_REPO }}` |
+            | 源码 ref | `${{ env.DAE_REF }}` |
+            | GOOS / GOARCH | `linux` / `${{ env.GOARCH }}` |
+            | eBPF target | `${{ env.BPF_TARGET }}` |
+            | Go | `${{ env.GO_VERSION }}` |
             | 工具链 | clang-15 / llvm-15，CGO_ENABLED=0（纯静态） |
             | 构建日期 | ${{ steps.meta.outputs.date }} (UTC) |
 
